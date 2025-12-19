@@ -99,8 +99,7 @@ fastify.get("/scrape", async (request, reply) => {
         });
 
         const hours = Math.floor(totalMin / 60);
-        const minutes = totalMin % 60;
-        finalData.timePlayed = `${hours}h${minutes}min`;
+        finalData.timePlayed = `${hours}h`;
       }
 
       function getStatFromContainer(container, labelName) {
