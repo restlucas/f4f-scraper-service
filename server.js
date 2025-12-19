@@ -15,27 +15,60 @@ fastify.get("/scrape", async (request, reply) => {
   }
 
   const { url } = request.query;
-
   if (!url) {
     return reply.status(400).send({ error: "URL é obrigatória" });
   }
 
+  const decodedUrl = decodeURIComponent(url);
+
+  // Launch com argumentos para estabilidade em Docker/Linux
   const browser = await puppeteer.launch({
     headless: "new",
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--no-first-run",
+      "--no-zygote",
+      "--disable-gpu",
+    ],
   });
-
-  const decodedUrl = decodeURIComponent(url);
-  console.log(decodedUrl);
 
   try {
     const page = await browser.newPage();
+
+    // 1. Emular uma tela real
+    await page.setViewport({ width: 1366, height: 768 });
+
+    // 2. User Agent moderno
     await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
 
-    await page.goto(decodedUrl, { waitUntil: "networkidle2", timeout: 45000 });
-    await page.waitForSelector(".stat-name", { timeout: 15000 });
+    // 3. Bloquear recursos inúteis (Anúncios/Imagens) para evitar timeout
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const type = req.resourceType();
+      if (["image", "font", "media"].includes(type)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
+    // 4. Navegação com estratégia menos exigente que networkidle2
+    // O tracker.gg nunca fica "ocioso" por causa dos trackers de analytics
+    await page.goto(decodedUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000,
+    });
+
+    // 5. Esperar o elemento chave com um tempo razoável
+    await page.waitForSelector(".stat-name", { timeout: 30000 });
+
+    // Pequena pausa para garantir que o JS do Tracker.gg rendarizou os números
+    await new Promise((r) => setTimeout(r, 2000));
 
     const data = await page.evaluate(() => {
       function parseNumber(val) {
@@ -72,6 +105,22 @@ fastify.get("/scrape", async (request, reply) => {
         timePlayed: 0,
       };
 
+      function getStatFromContainer(container, labelName) {
+        if (!container) return null;
+        const allStats = container.querySelectorAll(".stat-ver, .stat-hor");
+        for (const stat of allStats) {
+          const name = stat
+            .querySelector(".stat-name")
+            ?.textContent.trim()
+            .toLowerCase();
+          if (name === labelName.toLowerCase()) {
+            return stat.querySelector(".stat-value")?.textContent.trim();
+          }
+        }
+        return null;
+      }
+
+      // Lógica de Classes
       const classSections = Array.from(
         document.querySelectorAll("section.v3-card")
       );
@@ -91,32 +140,16 @@ fastify.get("/scrape", async (request, reply) => {
           const timeRaw =
             block.querySelector(".stat-value span")?.textContent.trim() || "";
           const mins = parseTimeInMinutes(timeRaw);
-
           totalMin += mins;
           if (mins > maxMin) {
             maxMin = mins;
             finalData.bestClass = name;
           }
         });
-
-        const hours = Math.floor(totalMin / 60);
-        finalData.timePlayed = `${hours}h`;
+        finalData.timePlayed = `${Math.floor(totalMin / 60)}h`;
       }
 
-      function getStatFromContainer(container, labelName) {
-        const allStats = container.querySelectorAll(".stat-ver, .stat-hor");
-        for (const stat of allStats) {
-          const name = stat
-            .querySelector(".stat-name")
-            ?.textContent.trim()
-            .toLowerCase();
-          if (name === labelName.toLowerCase()) {
-            return stat.querySelector(".stat-value")?.textContent.trim();
-          }
-        }
-        return null;
-      }
-
+      // Stats Gerais
       const gridStats = document.querySelector(".grid.grid-cols-2.gap-px");
       if (gridStats) {
         finalData.hsPercent = parseNumber(
@@ -130,13 +163,16 @@ fastify.get("/scrape", async (request, reply) => {
         );
       }
 
+      // Detalhes (Kills, Deaths, etc)
       const detailedGrids = document.querySelectorAll(
         ".v3-card__body.grid.grid-cols-2"
       );
-
       detailedGrids.forEach((grid) => {
-        finalData.wins += parseNumber(getStatFromContainer(grid, "Wins"));
-        finalData.kills += parseNumber(getStatFromContainer(grid, "Kills"));
+        const k = getStatFromContainer(grid, "Kills");
+        if (k) finalData.kills += parseNumber(k);
+
+        const w = getStatFromContainer(grid, "Wins");
+        if (w) finalData.wins += parseNumber(w);
 
         const l = getStatFromContainer(grid, "Losses");
         if (l) finalData.losses += parseNumber(l);
@@ -151,13 +187,10 @@ fastify.get("/scrape", async (request, reply) => {
         if (r) finalData.revives += parseNumber(r);
       });
 
-      if (finalData.deaths > 0) {
-        finalData.killDeath = Number(
-          (finalData.kills / finalData.deaths).toFixed(2)
-        );
-      } else {
-        finalData.killDeath = finalData.kills;
-      }
+      finalData.killDeath =
+        finalData.deaths > 0
+          ? Number((finalData.kills / finalData.deaths).toFixed(2))
+          : finalData.kills;
 
       return finalData;
     });
@@ -165,11 +198,12 @@ fastify.get("/scrape", async (request, reply) => {
     await browser.close();
     return data;
   } catch (error) {
-    await browser.close();
+    if (browser) await browser.close();
     request.log.error(error);
-    return reply
-      .status(500)
-      .send({ error: "Falha no scraping", details: error.message });
+    return reply.status(500).send({
+      error: "Falha no scraping",
+      details: error.message,
+    });
   }
 });
 
