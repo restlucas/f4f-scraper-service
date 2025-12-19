@@ -25,13 +25,15 @@ fastify.get("/scrape", async (request, reply) => {
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
 
+  const decodedUrl = decodeURIComponent(url);
+
   try {
     const page = await browser.newPage();
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
     );
 
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
+    await page.goto(decodedUrl, { waitUntil: "networkidle2", timeout: 45000 });
     await page.waitForSelector(".stat-name", { timeout: 15000 });
 
     const data = await page.evaluate(() => {
