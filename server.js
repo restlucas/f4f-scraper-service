@@ -26,6 +26,7 @@ fastify.get("/scrape", async (request, reply) => {
   });
 
   const decodedUrl = decodeURIComponent(url);
+  console.log(decodedUrl);
 
   try {
     const page = await browser.newPage();
